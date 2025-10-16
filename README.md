@@ -1,1 +1,0 @@
-# Adafriut-x-Raspberry-Pi-Humidity-Temperature-Gyroscope-

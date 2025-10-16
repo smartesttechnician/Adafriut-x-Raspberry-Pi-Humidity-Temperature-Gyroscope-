@@ -1,0 +1,113 @@
+
+import cv2
+import numpy as np
+import time
+import threading
+from picamera2 import Picamera2
+from Adafruit_IO import Client
+from sense_hat import SenseHat
+
+# ----------------------------- Adafruit IO Setup -----------------------------
+ADAFRUIT_AIO_USERNAME = "Insert your own username lolol"
+ADAFRUIT_AIO_KEY = "my key is ..."
+aio = Client(ADAFRUIT_AIO_USERNAME, ADAFRUIT_AIO_KEY)
+
+# Initialize Sense HAT
+sense = SenseHat()
+sense.clear()
+
+# Get feeds from Adafruit IO
+temperature_feed = aio.feeds('temperature')
+humidity_feed = aio.feeds('humidity')
+pitch_feed = aio.feeds('pitch')
+roll_feed = aio.feeds('roll')
+# yaw_feed = aio.feeds('yaw')  # Uncomment if needed
+
+# Enable only accelerometer readings
+sense.set_imu_config(False, False, True)
+accel_only = sense.get_accelerometer()
+print("p: {pitch}, r: {roll}, y: {yaw}".format(**accel_only))
+
+# ----------------------------- Color Ranges -----------------------------
+color_ranges = {
+    "red": ((0, 70, 50), (10, 255, 255)),
+    "green": ((36, 25, 25), (86, 255, 255)),
+    "purple": ((129, 50, 70), (158, 255, 255))
+}
+
+# ----------------------------- Camera Setup -----------------------------
+picam2 = Picamera2()
+picam2.configure(picam2.create_preview_configuration(
+    main={"format": "BGR888", "size": (640, 480)}))
+picam2.start()
+
+# ----------------------------- Color Detection Function -----------------------------
+def detect_colors(frame):
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    detected_colors = []
+
+    for color_name, (lower, upper) in color_ranges.items():
+        mask = cv2.inRange(hsv, np.array(lower), np.array(upper))
+        mask = cv2.erode(mask, None, iterations=2)
+        mask = cv2.dilate(mask, None, iterations=2)
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area > 1000:
+                detected_colors.append(color_name)
+                x, y, w, h = cv2.boundingRect(cnt)
+                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 0, 0), 2)
+                cv2.putText(frame, color_name, (x, y - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+
+    return frame, detected_colors
+
+# ----------------------------- Sensor Upload Function -----------------------------
+def upload_sensor_data():
+    while True:
+        temperature = round(sense.get_temperature(), 1)
+        humidity = round(sense.get_humidity(), 1)
+        accel_only = sense.get_accelerometer()
+        pitch = round(accel_only['pitch'], 2)
+        roll = round(accel_only['roll'], 2)
+        yaw = round(accel_only['yaw'], 2)
+
+        if temperature is not None and humidity is not None:
+            print("Temperature =", temperature)
+            print("Humidity =", humidity)
+            print("p: {pitch}, r: {roll}, y: {yaw}".format(pitch=pitch, roll=roll, yaw=yaw))
+
+            aio.send(temperature_feed.key, str(temperature))
+            aio.send(humidity_feed.key, str(humidity))
+            aio.send(pitch_feed.key, str(pitch))
+            aio.send(roll_feed.key, str(roll))
+            # aio.send(yaw_feed.key, str(yaw))  # Uncomment if needed
+
+            # Alert condition
+            if temperature > 30 or humidity > 53 or pitch > 300:
+                sense.show_letter("0", text_colour=[255, 0, 0])  # Red alert
+            else:
+                sense.clear()
+
+        time.sleep(3)  # Upload every 3 seconds
+
+# ----------------------------- Start Upload Thread -----------------------------
+sensor_thread = threading.Thread(target=upload_sensor_data)
+sensor_thread.daemon = True  # Ends with main program
+sensor_thread.start()
+
+# ----------------------------- Main Loop -----------------------------
+try:
+    while True:
+        frame = picam2.capture_array()
+        processed_frame, detected = detect_colors(frame)
+        cv2.imshow("Color Detection", processed_frame)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+finally:
+    picam2.stop()
+    cv2.destroyAllWindows()
